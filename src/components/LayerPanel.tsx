@@ -24,6 +24,8 @@ interface LayerPanelProps {
   onTerrainRetry?: () => void;
   onTerrainFocus?: () => void;
   on3DModeSelected?: () => void;
+  /** False while the splash is up; the rail slides in when it turns true. */
+  revealed?: boolean;
 }
 
 interface LayerDef {
@@ -198,7 +200,7 @@ function SubLayerStem() {
   );
 }
 
-function LayerPanel({ data, activeLayers, setActiveLayers, isMobile, theme = 'core', setTheme, capabilities = {}, terrainStatus = 'idle', onTerrainRetry, onTerrainFocus, on3DModeSelected }: LayerPanelProps) {
+function LayerPanel({ data, activeLayers, setActiveLayers, isMobile, theme = 'core', setTheme, capabilities = {}, terrainStatus = 'idle', onTerrainRetry, onTerrainFocus, on3DModeSelected, revealed = true }: LayerPanelProps) {
   const [hoveredGroup, setHoveredGroup] = useState<string | null>(null);
   /**
    * A pinned group stays open when the pointer leaves. Hover-only flyouts are
@@ -347,8 +349,8 @@ function LayerPanel({ data, activeLayers, setActiveLayers, isMobile, theme = 'co
   return (
     <motion.div
       initial={{ x: -60, opacity: 0 }}
-      animate={{ x: 0, opacity: 1 }}
-      transition={{ type: 'spring', damping: 30, stiffness: 200, delay: 2.8 }}
+      animate={revealed ? { x: 0, opacity: 1 } : { x: -60, opacity: 0 }}
+      transition={{ type: 'spring', damping: 30, stiffness: 200, delay: 0.25 }}
       className="absolute top-0 left-0 h-full w-[48px] flex flex-col items-center pt-24 pb-6 z-50 pointer-events-auto"
       style={{
         background: 'rgba(0,0,0,0.15)',

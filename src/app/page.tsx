@@ -144,6 +144,20 @@ const newsTransform = (d: { news?: unknown[]; sources?: unknown[]; timestamp?: s
   alert_pins: (d.news ?? []).filter(n => (n as { place?: unknown } | null)?.place),
 });
 
+/* One version label. The splash said V4.2 while the header said V.4.1. */
+const APP_VERSION = 'V4.2';
+
+/* The splash reports what has actually happened. The last stage waits for
+   the map's first finished frame instead of a fixed timer. */
+const SPLASH_STAGES = ['ESTABLISHING SECURE CONNECTION...', 'INITIALIZING FEEDS...', 'CALIBRATING SENSORS...', 'SYSTEM READY'];
+const SPLASH_PROGRESS = ['25%', '50%', '78%', '100%'];
+
+/* The HUD enters as one sequence when the splash lifts. Each piece used to
+   run its own fixed timer (2.5–3.5 s), which raced a splash that now lasts
+   as long as the map takes to draw. */
+const HUD_EASE = [0.22, 1, 0.36, 1] as const;
+const hudIn = (delay: number) => ({ duration: 0.7, ease: HUD_EASE, delay });
+
 export default function Dashboard() {
   const dataRef = useRef<any>({});
   const [dataVersion, setDataVersion] = useState(0);
@@ -151,7 +165,7 @@ export default function Dashboard() {
 
   const [backendStatus, setBackendStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
   const [mapView, setMapView] = useState({ zoom: 2.5, latitude: 20 });
-  const [flyToLocation, setFlyToLocation] = useState<{ lat: number; lng: number; zoom?: number; alertId?: string; ts: number } | null>(null);
+  const [flyToLocation, setFlyToLocation] = useState<{ lat: number; lng: number; zoom?: number; alertId?: string; duration?: number; ts: number } | null>(null);
   /* The Live Alerts the feed's filters leave showing; the map pins those. */
   const [pinnedAlertIds, setPinnedAlertIds] = useState<string[] | null>(null);
   const [globalStats, setGlobalStats] = useState<any>(null);
@@ -161,6 +175,12 @@ export default function Dashboard() {
   const [regionDossier, setRegionDossier] = useState<any>(null);
   const [dossierLoading, setDossierLoading] = useState(false);
   const [showSplash, setShowSplash] = useState(true);
+  const [splashStage, setSplashStage] = useState(0);
+  const [mapReady, setMapReady] = useState(false);
+  const revealed = !showSplash;
+  /* Where the viewer is, by IP. Asked for at once; the camera flies there
+     when the splash lifts. */
+  const [homeLocation, setHomeLocation] = useState<{ lat: number; lng: number } | null>(null);
   const autoLocateCancelled = useRef(false);
 
   const [activeCamera, setActiveCamera] = useState<any>(null);
@@ -359,13 +379,36 @@ export default function Dashboard() {
   const [liveFeedName, setLiveFeedName] = useState('');
   const [liveFeedEmbedAllowed, setLiveFeedEmbedAllowed] = useState(true);
 
-  // Splash screen
+  /* Splash: it lifts once the map has drawn its first frame. It never lifts
+     before the intro has played (about 2.2 s), and never later than 7 s, so a
+     machine that cannot start the map still reaches the platform. */
   useEffect(() => {
-    const splashTimer = setTimeout(() => setShowSplash(false), 2500);
-    return () => clearTimeout(splashTimer);
+    const timers = [
+      setTimeout(() => setSplashStage(s => Math.max(s, 1)), 1100),
+      setTimeout(() => setSplashStage(s => Math.max(s, 2)), 1700),
+      setTimeout(() => setShowSplash(false), 7000),
+    ];
+    return () => timers.forEach(clearTimeout);
   }, []);
+  useEffect(() => {
+    if (!mapReady || splashStage !== 2) return;
+    const t = setTimeout(() => setSplashStage(3), 500);
+    return () => clearTimeout(t);
+  }, [mapReady, splashStage]);
+  useEffect(() => {
+    if (splashStage !== 3) return;
+    // Long enough to read SYSTEM READY before the splash goes.
+    const t = setTimeout(() => setShowSplash(false), 550);
+    return () => clearTimeout(t);
+  }, [splashStage]);
 
-  // On mount: geolocate by IP and fly to user's city (after splash/map init)
+  // Fly from the globe down to the viewer's city as the splash lifts.
+  useEffect(() => {
+    if (!revealed || !homeLocation || autoLocateCancelled.current) return;
+    setFlyToLocation({ ...homeLocation, zoom: 8, duration: 3500, ts: Date.now() });
+  }, [revealed, homeLocation]);
+
+  // On mount: restore layers, probe optional feeds, and geolocate by IP
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -394,21 +437,20 @@ export default function Dashboard() {
     const cancelAutoLocate = () => { autoLocateCancelled.current = true; };
     window.addEventListener('pointerdown', cancelAutoLocate, { once: true });
     window.addEventListener('keydown', cancelAutoLocate, { once: true });
-    const geoTimer = setTimeout(() => {
-      if (autoLocateCancelled.current) return;
-      fetch('/api/geo', { signal: geoController.signal })
-        .then(r => r.json())
-        .then(geo => {
-          if (!autoLocateCancelled.current && !geoController.signal.aborted && geo.status === 'success' &&
-              Number.isFinite(geo.lat) && Number.isFinite(geo.lon) && Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180) {
-            setFlyToLocation({ lat: geo.lat, lng: geo.lon, zoom: 8, ts: Date.now() });
-          }
-        })
-        .catch(() => { /* silent — keep default global view */ });
-    }, 3000);
+    // Asked for at once rather than after a fixed 3 s wait, so the answer is
+    // in hand when the splash lifts; the effect above does the flying.
+    fetch('/api/geo', { signal: geoController.signal })
+      .then(r => r.json())
+      .then(geo => {
+        if (!geoController.signal.aborted && geo.status === 'success' &&
+            Number.isFinite(geo.lat) && Number.isFinite(geo.lon) && Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180) {
+          setHomeLocation({ lat: geo.lat, lng: geo.lon });
+        }
+      })
+      .catch(() => { /* silent — stay on the globe */ });
 
     return () => {
-      clearTimeout(geoTimer); geoController.abort();
+      geoController.abort();
       window.removeEventListener('pointerdown', cancelAutoLocate);
       window.removeEventListener('keydown', cancelAutoLocate);
     };
@@ -994,8 +1036,10 @@ export default function Dashboard() {
         {showSplash && (
           <motion.div
             initial={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.8, ease: 'easeInOut' }}
+            // A slight push-through as it fades: the splash gives way to the globe
+            // behind it instead of just dissolving.
+            exit={{ opacity: 0, scale: 1.04 }}
+            transition={{ duration: 0.7, ease: [0.4, 0, 0.2, 1] }}
             className="absolute inset-0 z-[999] flex flex-col items-center justify-center overflow-hidden"
             style={{ background: 'radial-gradient(ellipse at center, #0a0a14 0%, var(--bg-void) 70%)' }}
           >
@@ -1005,14 +1049,14 @@ export default function Dashboard() {
               animation: 'splashScanDrift 8s linear infinite',
             }} />
 
-            {/* ── V4.2 badge — top-left ── */}
+            {/* ── Version badge — top-left ── */}
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 0.6 }}
               transition={{ delay: 0.8, duration: 0.5 }}
               className="absolute top-6 left-6 z-[2] font-mono text-[11px] tracking-[0.3em] text-[var(--gold-primary)]"
             >
-              V4.2
+              {APP_VERSION}
             </motion.div>
 
 
@@ -1119,32 +1163,28 @@ export default function Dashboard() {
               <div className="relative w-full h-[2px] rounded-full overflow-hidden" style={{ background: 'rgba(212,175,55,0.1)' }}>
                 <motion.div
                   initial={{ width: '0%' }}
-                  animate={{ width: ['0%', '25%', '50%', '78%', '100%'] }}
-                  transition={{ duration: 2.2, delay: 0.5, times: [0, 0.25, 0.5, 0.75, 1], ease: 'easeInOut' }}
+                  animate={{ width: SPLASH_PROGRESS[splashStage] }}
+                  transition={{ duration: 0.55, delay: splashStage === 0 ? 0.5 : 0, ease: 'easeInOut' }}
                   className="absolute inset-y-0 left-0 rounded-full"
                   style={{ background: 'linear-gradient(90deg, var(--gold-primary), var(--cyan-primary), var(--gold-primary))', boxShadow: '0 0 12px rgba(212,175,55,0.4)' }}
                 />
               </div>
 
-              {/* Status messages — cycling */}
+              {/* Status message — one line, swapped as each stage is reached */}
               <div className="mt-3 h-4 flex items-center justify-center">
-                {[
-                  { text: 'ESTABLISHING SECURE CONNECTION...', delay: 0.5 },
-                  { text: 'INITIALIZING FEEDS...', delay: 1.1 },
-                  { text: 'CALIBRATING SENSORS...', delay: 1.7 },
-                  { text: 'SYSTEM READY', delay: 2.2 },
-                ].map((stage, i) => (
+                <AnimatePresence mode="wait">
                   <motion.span
-                    key={i}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: [0, 1, 1, 0] }}
-                    transition={{ delay: stage.delay, duration: 0.6, times: [0, 0.1, 0.7, 1] }}
-                    className="absolute text-[10px] font-mono tracking-[0.25em]"
-                    style={{ color: i === 3 ? 'var(--cyan-primary)' : 'var(--text-muted)' }}
+                    key={splashStage}
+                    initial={{ opacity: 0, y: 3 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -3 }}
+                    transition={{ duration: 0.18, delay: splashStage === 0 ? 0.5 : 0 }}
+                    className="text-[10px] font-mono tracking-[0.25em]"
+                    style={{ color: splashStage === 3 ? 'var(--cyan-primary)' : 'var(--text-muted)' }}
                   >
-                    {stage.text}
+                    {SPLASH_STAGES[splashStage]}
                   </motion.span>
-                ))}
+                </AnimatePresence>
               </div>
             </div>
 
@@ -1198,7 +1238,8 @@ export default function Dashboard() {
           onEntityClick={handleEntityClick} 
           onMouseCoords={handleMouseCoords} 
           onRightClick={handleRightClick} 
-          onViewStateChange={setMapView} 
+          onViewStateChange={setMapView}
+          onReady={() => setMapReady(true)}
           flyToLocation={flyToLocation}
           alertPinIds={pinnedAlertIds}
           sweepData={sweepData}
@@ -1308,7 +1349,7 @@ export default function Dashboard() {
 
       {/* ── MAP VIEW CONTROLS ── */}
       <motion.div
-        initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 3.5 }}
+        initial={{ opacity: 0, y: 20 }} animate={revealed ? { opacity: 1, y: 0 } : { opacity: 0, y: 20 }} transition={hudIn(0.45)}
         className="absolute bottom-[75px] md:bottom-[100px] z-[200] flex flex-col gap-1.5 pointer-events-none"
         style={{ left: isMobile ? '12px' : '120px' }}
       >
@@ -1331,7 +1372,7 @@ export default function Dashboard() {
       </motion.div>
 
       {/* ── HEADER ── */}
-      <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 1, delay: 2.5 }} className={`absolute top-4 z-[200] pointer-events-none flex flex-col`} style={{ left: isMobile ? '24px' : '64px', right: '24px' }}>
+      <motion.div initial={{ opacity: 0, y: -20 }} animate={revealed ? { opacity: 1, y: 0 } : { opacity: 0, y: -20 }} transition={hudIn(0.15)} className={`absolute top-4 z-[200] pointer-events-none flex flex-col`} style={{ left: isMobile ? '24px' : '64px', right: '24px' }}>
         <div className="flex items-center gap-3 w-fit">
           <svg viewBox="0 0 650 500" className="w-8 h-8 md:w-10 md:h-10 shrink-0 transition-colors duration-500 text-[#D4AF37] drop-shadow-[0_0_8px_rgba(255,215,0,0.5)]" fill="currentColor">
             <path d="m620.39,364.82c-0.53628-7.2677-1.7767-14.482-5.0286-21.276-9.4786-19.803-33.963-29.34-53.026-19.284-15.333,8.0885-22.563,29.331-13.578,45.149,6.873,12.099,23.072,18.235,35.622,10.228,4.4328-2.828,7.6343-7.2793,8.9938-12.286,1.3595-5.0063,0.68452-10.798-2.9392-15.401-2.2364-2.8407-5.4473-4.7654-9.1114-5.408-3.664-0.64263-8.1708,0.40388-10.875,3.9972-1.7829,2.3692-1.91,4.5449-1.4108,7.1127,0.24961,1.2839,0.78116,2.8399,2.3513,3.9972,1.5702,1.1573,4.2926,1.9424,5.5844,0.58783,1.1069-1.1607-0.67477-3.153-0.73029-4.7559-0.0388-0.83158-0.0772-1.7317,0.26004-2.4745,0.89679-1.1463,1.8493-1.342,3.4682-1.0581,1.6548,0.29023,3.6474,1.4542,4.5851,2.6452v0.0588c2.0224,2.5986,2.3717,5.5943,1.5284,8.6999-0.81645,3.0066-2.8568,5.919-5.4668,7.7006l-0.29391,0.23513c-8.5452,5.4516-18.484,0.70317-23.392-7.9366-6.7162-11.823-1.5113-26.282,10.285-32.505,15.078-7.9537,35.744,1.451,40.36,17.085,4.566,15.464,2.8715,30.938,0.27385,37.511l10.609,0.073c2.5579-12.089,1.9287-15.035,1.9287-22.696z" />
@@ -1352,7 +1393,7 @@ export default function Dashboard() {
 
 
       {/* ── TOP-RIGHT STATUS (desktop) ── */}
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 3 }} className="status-bar-desktop absolute top-4 right-6 z-[200] pointer-events-none flex items-center gap-3 text-[10px] font-mono tracking-widest text-[var(--text-muted)]">
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: revealed ? 1 : 0 }} transition={hudIn(0.35)} className="status-bar-desktop absolute top-4 right-6 z-[200] pointer-events-none flex items-center gap-3 text-[10px] font-mono tracking-widest text-[var(--text-muted)]">
 
         <span className="hidden lg:inline-flex items-center gap-1.5">
           <ZuluClock />
@@ -1372,7 +1413,7 @@ export default function Dashboard() {
 
         {spaceWeather && <span className="hidden lg:inline" title={spaceWeather.kp_index == null ? 'Geomagnetic Storm Index — no reading from NOAA' : `Geomagnetic Storm Index — Kp${spaceWeather.kp_index}`}>SOLAR: <span style={{ color: spaceWeather.storm_color, fontWeight: 700 }}>{spaceWeather.kp_index == null ? 'N/A' : `Kp${spaceWeather.kp_index}`}</span></span>}
 
-        <span className="text-[11px] font-bold tracking-[0.2em] text-[var(--text-muted)] opacity-50">V.4.1</span>
+        <span className="text-[11px] font-bold tracking-[0.2em] text-[var(--text-muted)] opacity-50">{APP_VERSION}</span>
         
         <TokenPanel />
 
@@ -1383,7 +1424,7 @@ export default function Dashboard() {
       {/* The route planner claims the top of a phone screen; leaving this in
           place would put the support badge underneath the destination field. */}
       {isMobile && !showDirections && !navSession && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 2.5 }} className="absolute top-3 right-3 z-[200] pointer-events-auto flex flex-col items-end gap-1.5">
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: revealed ? 1 : 0 }} transition={hudIn(0.35)} className="absolute top-3 right-3 z-[200] pointer-events-auto flex flex-col items-end gap-1.5">
           <div className="flex items-center gap-2">
             <TokenPanel />
             <SupportMenu compact />
@@ -1394,12 +1435,12 @@ export default function Dashboard() {
 
 
       {/* ── NEW SIDEBAR (Root Level) ── */}
-      {showLayers && !isMobile && <LayerPanel {...terrainPanelProps} data={data} activeLayers={activeLayers} setActiveLayers={setActiveLayers} theme={osirisTheme} setTheme={setOsirisTheme} capabilities={capabilities} />}
+      {showLayers && !isMobile && <LayerPanel {...terrainPanelProps} revealed={revealed} data={data} activeLayers={activeLayers} setActiveLayers={setActiveLayers} theme={osirisTheme} setTheme={setOsirisTheme} capabilities={capabilities} />}
 
 
 
       {/* ── RIGHT TOOL STRIP (desktop only — mobile uses bottom nav) ── */}
-      {!isMobile && <div className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-2 z-[250] pointer-events-auto bg-black/40 backdrop-blur-sm p-1 rounded-full border border-white/5">
+      {!isMobile && <motion.div initial={{ opacity: 0, x: 12 }} animate={revealed ? { opacity: 1, x: 0 } : { opacity: 0, x: 12 }} transition={hudIn(0.3)} className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-2 z-[250] pointer-events-auto bg-black/40 backdrop-blur-sm p-1 rounded-full border border-white/5">
         <div className="relative group">
           <button onClick={() => { setShowIntel(!showIntel); setShowMarkets(false); setShowAlerts(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showIntel ? 'bg-[var(--cyan-primary)]/20' : 'hover:bg-white/10'}`} title="OSINT Recon — IP lookup, network sweep, geolocation" aria-label="OSINT Recon" aria-expanded={showIntel}>
             <Radar className={`w-4 h-4 ${showIntel ? 'text-[var(--cyan-primary)]' : 'text-white/60'}`} />
@@ -1599,7 +1640,7 @@ export default function Dashboard() {
         </div>
 
 
-      </div>}
+      </motion.div>}
 
       {/* ── LIVE FEED VIEWER OVERLAY ── */}
       <AnimatePresence>
@@ -1811,7 +1852,7 @@ export default function Dashboard() {
 
       {/* ── BOTTOM CURSOR INFO (desktop) ── */}
       {!isMobile && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 3, duration: 0.8 }} className="desktop-only absolute bottom-8 z-[200] pointer-events-auto" style={{ left: '72px' }}>
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: revealed ? 1 : 0 }} transition={hudIn(0.6)} className="desktop-only absolute bottom-8 z-[200] pointer-events-auto" style={{ left: '72px' }}>
           <div className="flex items-center gap-5 text-[9px] font-mono tracking-widest text-[var(--text-muted)] opacity-60">
             <div className="flex gap-2 items-center" title="Cursor coordinates (hover over map)">
               <span>CURSOR</span>
@@ -1926,7 +1967,7 @@ export default function Dashboard() {
       <KeyboardShortcuts />
 
       {/* ── GLOBAL STATUS TICKER (bottom) ── */}
-      <GlobalStatusBar />
+      <GlobalStatusBar revealed={revealed} />
 
       {/* Shortcut hint — more visible */}
       <div className="desktop-only absolute bottom-[26px] right-5 z-[200] pointer-events-none text-[9px] font-mono text-[var(--text-muted)] opacity-50 tracking-widest" title="Press ? to see all keyboard shortcuts">

@@ -37,8 +37,11 @@ interface OsirisMapProps {
   onMouseCoords?: (coords: { lat: number; lng: number }) => void;
   onRightClick?: (coords: { lat: number; lng: number }) => void;
   onViewStateChange?: (vs: { zoom: number; latitude: number }) => void;
-  /** `alertId` also opens that Live Alert's pin once the camera arrives. */
-  flyToLocation?: { lat: number; lng: number; zoom?: number; alertId?: string; ts: number } | null;
+  /** `alertId` also opens that Live Alert's pin once the camera arrives.
+   *  `duration` overrides the default 2 s flight. */
+  flyToLocation?: { lat: number; lng: number; zoom?: number; alertId?: string; duration?: number; ts: number } | null;
+  /** Fires once, when the map has drawn its first complete frame. */
+  onReady?: () => void;
   /** Which Live Alerts to pin — the reports the feed is showing. Null pins them all. */
   alertPinIds?: string[] | null;
   projection?: 'mercator' | 'globe';
@@ -162,7 +165,7 @@ interface AlertPinFeature {
   properties: AlertPinProps;
 }
 
-function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightClick, onViewStateChange, flyToLocation, alertPinIds = null, projection = 'globe', terrainEnabled = false, terrainRetry = 0, terrainFocus = 0, onTerrainStatusChange, mapStyle = 'dark', sweepData, scanTargets = [], demoMode = false, theme = 'core', drawnPolygons = [], arcgisLayers = [], drawMode = null, onDrawComplete, onDrawProgress, onDrawCancel, drawCommand = null, onMapCenter, route = null, userLocation = null, followUser = false, onFollowInterrupt, navigating = false, aircraftAirports = {} }: OsirisMapProps) {
+function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightClick, onViewStateChange, onReady, flyToLocation, alertPinIds = null, projection = 'globe', terrainEnabled = false, terrainRetry = 0, terrainFocus = 0, onTerrainStatusChange, mapStyle = 'dark', sweepData, scanTargets = [], demoMode = false, theme = 'core', drawnPolygons = [], arcgisLayers = [], drawMode = null, onDrawComplete, onDrawProgress, onDrawCancel, drawCommand = null, onMapCenter, route = null, userLocation = null, followUser = false, onFollowInterrupt, navigating = false, aircraftAirports = {} }: OsirisMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
@@ -184,6 +187,8 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
   const [palette, setPalette] = useState<MapPalette>(MAP_DEFAULTS);
   const paletteRef = useRef(palette);
   useEffect(() => { paletteRef.current = palette; }, [palette]);
+  const onReadyRef = useRef(onReady);
+  useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
   const prevDrawnPolygonsRef = useRef<string[]>([]);
   const prevArcgisLayersRef = useRef<string[]>([]);
   const satLayerRef = useRef<ReturnType<typeof createSatelliteLayer> | null>(null);
@@ -306,10 +311,15 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
 
     const container = containerRef.current;
     maplibregl.setWorkerUrl(`/vendor/maplibre/${maplibregl.getVersion()}/maplibre-gl-worker.mjs`);
+    /* Open on the whole globe, turned to the viewer's side of it. The UTC
+       offset is a free, instant stand-in for longitude (15° an hour), so the
+       fly-in to their city after the splash is a dive, not a spin round the
+       planet. This used to open on Bulgaria at zoom 6.5 for everyone. */
+    const facingLng = Math.max(-180, Math.min(180, -new Date().getTimezoneOffset() / 4));
     const baseOptions = {
       container,
       style: styleUrl,
-      center: [25.48, 42.70] as [number, number], zoom: 6.5, minZoom: 1.5, maxZoom: 18,
+      center: [facingLng, 20] as [number, number], zoom: 1.8, minZoom: 1.5, maxZoom: 18,
       /* The basemap is CARTO's, drawn from OpenStreetMap, and the places on it
          are searched and named through OpenStreetMap too. Both have to be
          credited on the map itself; this was switched off, which is half of
@@ -888,6 +898,9 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
 
 
       setMapReady(true);
+      // 'load' means the style parsed; 'idle' means the tiles are drawn.
+      // The splash waits for the second, so it lifts onto a finished globe.
+      map.once('idle', () => onReadyRef.current?.());
       // Dev-only handle. The map is otherwise unreachable from the console,
       // which makes interaction bugs guesswork rather than diagnosis.
       if (process.env.NODE_ENV === 'development') (window as any).__osirisMap = map;
@@ -2538,7 +2551,7 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
   useEffect(() => {
     if (!mapReady || !mapRef.current || !flyToLocation) return;
     const map = mapRef.current;
-    map.flyTo({ center: [flyToLocation.lng, flyToLocation.lat], zoom: flyToLocation.zoom ?? 8, duration: 2000 });
+    map.flyTo({ center: [flyToLocation.lng, flyToLocation.lat], zoom: flyToLocation.zoom ?? 8, duration: flyToLocation.duration ?? 2000 });
     const alertId = flyToLocation.alertId;
     if (!alertId) return;
     const open = () => openAlertPinRef.current?.(alertId);
