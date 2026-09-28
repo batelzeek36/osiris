@@ -270,10 +270,31 @@ async function fetchAllLiveConflictData(): Promise<{ events: ConflictEvent[]; ev
   return { events: allEvents, eventsByRegion };
 }
 
+/* Every page load asks for this, and each request used to re-download and
+   re-parse every RSS feed: ~85 times a minute in production, on a server that
+   was already short of CPU. The feeds move on the order of minutes, so one
+   refresh serves everyone for five; an empty result is retried after one. */
+const LIVE_TTL_MS = 5 * 60 * 1000;
+const EMPTY_TTL_MS = 60 * 1000;
+type LiveConflictData = Awaited<ReturnType<typeof fetchAllLiveConflictData>>;
+let live: { at: number; data: LiveConflictData } | null = null;
+let liveRefresh: Promise<LiveConflictData> | null = null;
+
+function getLiveConflictData(): Promise<LiveConflictData> {
+  const ttl = live?.data.events.length ? LIVE_TTL_MS : EMPTY_TTL_MS;
+  if ((!live || Date.now() - live.at >= ttl) && !liveRefresh) {
+    liveRefresh = fetchAllLiveConflictData()
+      .then(data => { live = { at: Date.now(), data }; return data; })
+      .finally(() => { liveRefresh = null; });
+  }
+  // The last answer is served while a refresh runs; only the very first waits.
+  return live ? Promise.resolve(live.data) : liveRefresh!;
+}
+
 export async function GET() {
   try {
     // Fetch live conflict data from GDELT
-    const { events: liveEvents, eventsByRegion } = await fetchAllLiveConflictData();
+    const { events: liveEvents, eventsByRegion } = await getLiveConflictData();
 
     // Build enriched conflict zones
     const zones: ConflictZone[] = KNOWN_CONFLICTS.map(zone => {

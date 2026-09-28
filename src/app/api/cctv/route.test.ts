@@ -101,6 +101,34 @@ describe('CCTV partial responses', () => {
     expect(body.pendingRegions).toEqual(['uk']);
   });
 
+  /* In production two regions could never fill, so the catalogue stayed
+     incomplete and every request rebuilt it: ~100 rebuilds a minute, each
+     gzipping the whole catalogue on the main thread. */
+  it('chases an incomplete catalogue once a minute, not on every request', async () => {
+    const failed = () => Promise.resolve(new Response('', { status: 503 }));
+    vi.mocked(stealthFetch).mockImplementation(failed);
+    const plainFetch = vi.fn(failed);
+    vi.stubGlobal('fetch', plainFetch);
+    const upstreamCalls = () => vi.mocked(stealthFetch).mock.calls.length + plainFetch.mock.calls.length;
+
+    // Static regions answer, the rest fail: an incomplete catalogue.
+    const first = GET(new Request('http://localhost/api/cctv?region=all'));
+    await flushIO();
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect((await (await first).json()).pendingRegions.length).toBeGreaterThan(0);
+    const afterBuild = upstreamCalls();
+
+    for (let i = 0; i < 5; i++) await GET(new Request('http://localhost/api/cctv?region=all'));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(upstreamCalls()).toBe(afterBuild);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await GET(new Request('http://localhost/api/cctv?region=all'));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(upstreamCalls()).toBeGreaterThan(afterBuild);
+    vi.unstubAllGlobals();
+  });
+
   it('allows a bounded retry for an empty/failed provider response', async () => {
     vi.mocked(stealthFetch).mockResolvedValue(new Response('', { status: 503 }));
     const response = await GET(new Request('http://localhost/api/cctv?region=uk'));

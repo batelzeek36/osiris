@@ -23,6 +23,10 @@ services:
       - HOSTNAME=0.0.0.0
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # The saved camera catalogue and geocoder cache. A volume, so a rebuild
+    # or redeploy starts from them too, not only a restart.
+    volumes:
+      - osiris-data:/app/.cache
     restart: unless-stopped
     networks:
       - default
@@ -55,6 +59,7 @@ services:
 
 volumes:
   nginx-cache:
+  osiris-data:
 
 networks:
   umami_default:

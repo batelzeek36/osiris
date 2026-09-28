@@ -11,7 +11,6 @@ import { fetchBulgariaCameras } from './bulgaria';
 import { fetchGreeceCameras } from './greece';
 import { fetchSerbiaCameras } from './serbia';
 import { fetchMacedoniaCameras } from './macedonia';
-import { fetchTurkeyCameras } from './turkey';
 import { fetchRomaniaCameras } from './romania';
 import { fetchAustraliaCameras } from './australia';
 import { fetchItalyCameras } from './italy';
@@ -310,32 +309,6 @@ async function fetchCanadaCameras(): Promise<any[]> {
   return cams.filter((c: any) => c.lat && c.lng);
 }
 
-// ── US-CENTRAL: Chicago, Houston, Dallas, Denver ──
-async function fetchUSCentralCameras(): Promise<any[]> {
-  const cams: any[] = [];
-  // Illinois DOT
-  {
-    const data = await subSource('IDOT', 'https://www.travelmidwest.com/lmiga/cameraReport.json', 8000);
-    if (data) {
-      /* travelmidwest answers 200 with {updatedMessage, noDataMessage} and no
-         cameras at all — an object, not the array this assumed. That threw a
-         TypeError the old silent catch quietly absorbed; now it would take
-         us-central down with it, so the shape is checked. */
-      const rows = Array.isArray(data?.cameraReports) ? data.cameraReports : Array.isArray(data) ? data : [];
-      for (const cam of rows.slice(0, 800)) {
-        if (!cam.latitude || !cam.longitude) continue;
-        cams.push({
-          id: `ildot-${cams.length}`, lat: cam.latitude, lng: cam.longitude,
-          name: cam.cameraName || cam.description || 'IDOT Camera', city: 'Illinois', country: 'US',
-          feed_url: cam.imageUrl || cam.url || '', source: 'IDOT',
-        });
-      }
-    }
-  }
-
-  return cams.filter((c: any) => c.lat && c.lng);
-}
-
 // ── US-EAST: OH, DC, Florida, Georgia ──
 async function fetchUSEastCameras(): Promise<any[]> {
   const cams: any[] = [];
@@ -483,7 +456,12 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'uk': fetchTfLCameras,
   'us-west': async () => { const [w, c] = await Promise.all([fetchWSDOTCameras(), fetchCaltransCameras()]); return [...w, ...c]; },
   'us-east': fetchUSEastCameras,
-  'us-central': fetchUSCentralCameras,
+  /* No 'us-central' or 'turkey'. us-central's only source, travelmidwest's
+     camera report, now answers "no location selected" with no cameras, and
+     the Turkey list is empty on purpose (its Windy embeds are blocked; the
+     Turkish SkylineWebcams come in through 'asia-live'). A region that can never
+     fill kept the catalogue "incomplete" for good, and an incomplete
+     catalogue was rebuilt on every request. */
   'canada': fetchCanadaCameras,
   'europe': fetchEuropeCameras,
   'netherlands': fetchNetherlandsCameras,
@@ -492,7 +470,6 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'greece': fetchGreeceCameras,
   'serbia': fetchSerbiaCameras,
   'macedonia': fetchMacedoniaCameras,
-  'turkey': fetchTurkeyCameras,
   'romania': fetchRomaniaCameras,
   'australia': fetchAustraliaCameras,
   'italy': fetchItalyCameras,
@@ -797,11 +774,9 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   if (lat > 34.9 && lat < 42.1 && lng > -120.1 && lng < -113.9) regions.push('nevada');
   // Texas (TxDOT), including El Paso west of the central region.
   if (lat > 25.8 && lat < 36.6 && lng > -106.7 && lng < -93.4) regions.push('texas');
-  // US-Central
-  if (lat > 24 && lat < 49 && lng > -105 && lng < -80) regions.push('us-central');
-  // Michigan (MDOT) — explicit, since us-central only covers Illinois
+  // Michigan (MDOT) — explicit; there is no broad central-US source
   if (lat > 41.6 && lat < 48.3 && lng > -90.5 && lng < -82.1) regions.push('michigan');
-  // Indiana (INDOT TrafficWise) — explicit, since us-central only covers Illinois
+  // Indiana (INDOT TrafficWise) — explicit; there is no broad central-US source
   if (lat > 37.7 && lat < 41.9 && lng > -88.2 && lng < -84.6) regions.push('indiana');
   // Louisiana (LADOTD 511) — explicit, since neither us-central nor us-east reaches the Gulf coast
   if (lat > 28.8 && lat < 33.1 && lng > -94.2 && lng < -88.6) regions.push('louisiana');
@@ -843,7 +818,6 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   if (inSerbia) regions.push('serbia');
   if (inMacedonia) regions.push('macedonia');
   if (inRomania) regions.push('romania');
-  if (inTurkey) regions.push('turkey');
   if (inItaly) regions.push('italy');
   if (inCzechia) regions.push('czechia');
   if (inSlovakia) regions.push('slovakia');
@@ -907,6 +881,15 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
 
 /** How old the prebuilt world payload may get before a rebuild is kicked off. */
 const PAYLOAD_REFRESH_MS = 5 * 60 * 1000;
+/**
+ * How often an incomplete payload is chased. Chasing on every request meant
+ * back-to-back rebuilds, each serialising and gzipping ~9MB on the main thread
+ * (~170ms idle, far more under load). With a region that could not fill, that
+ * ran ~100 times a minute in production and starved the very fetches that
+ * would have completed it. Missing regions keep fetching in the background
+ * between chases; this only spaces out the rebuilds.
+ */
+const INCOMPLETE_REBUILD_MS = 60 * 1000;
 const REBUILD_DELAY_MS = 2_000;
 let rebuilding: Promise<void> | undefined;
 
@@ -972,9 +955,10 @@ export async function GET(request: Request) {
       if (ready) {
         void persistCatalogue();
         // Past its TTL, refresh behind the response rather than in front of it.
-        /* An incomplete catalogue is chased straight away; a complete one is
+        /* An incomplete catalogue is chased once a minute; a complete one is
            left alone until its regions actually go stale. */
-        if (!ready.complete || Date.now() - ready.builtAt > PAYLOAD_REFRESH_MS) void rebuildInBackground();
+        const age = Date.now() - ready.builtAt;
+        if ((!ready.complete && age > INCOMPLETE_REBUILD_MS) || age > PAYLOAD_REFRESH_MS) void rebuildInBackground();
         return servePayload(request, ready);
       }
     }
