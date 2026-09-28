@@ -37,6 +37,7 @@ const DrawHud = dynamic(() => import('@/components/DrawHud'), { ssr: false });
 // not the toolbar has loaded yet.
 import { toShape, queryRing, type DrawMode, type DrawnShape, type DrawProgress, type DrawResult } from '@/lib/draw';
 import { selectInPolygon } from '@/lib/aoi';
+import { pickLandingCity } from '@/lib/landing-cities';
 import { diffSweep, appendEvents, type WatchBaseline, type WatchEvent } from '@/lib/watch';
 import { STORAGE_KEY, serializeShapes, deserializeShapes, shapesToGeoJSON, downloadFile } from '@/lib/aoi-export';
 const TokenPanel = dynamic(() => import('@/components/TokenPanel'));
@@ -444,19 +445,35 @@ export default function Dashboard() {
     const cancelAutoLocate = () => { autoLocateCancelled.current = true; };
     window.addEventListener('pointerdown', cancelAutoLocate, { once: true });
     window.addEventListener('keydown', cancelAutoLocate, { once: true });
-    // Asked for at once rather than after a fixed 3 s wait, so the answer is
-    // in hand when the splash lifts; the effect above does the flying.
+    /* Asked for at once rather than after a fixed 3 s wait, so the answer is
+       in hand when the splash lifts; the effect above does the flying. When
+       the visitor's city can't be found (no public address, every provider
+       failed, or no answer within 6 s) the fly-in still happens, to a random
+       well-covered city, rather than stopping on the globe. */
+    let located = false;
+    const landSomewhere = () => {
+      if (located || geoController.signal.aborted) return;
+      located = true;
+      const city = pickLandingCity();
+      setHomeLocation({ lat: city.lat, lng: city.lng });
+    };
+    const geoGiveUp = setTimeout(landSomewhere, 6000);
     fetch('/api/geo', { signal: geoController.signal })
       .then(r => r.json())
       .then(geo => {
-        if (!geoController.signal.aborted && geo.status === 'success' &&
+        if (located || geoController.signal.aborted) return;
+        if (geo.status === 'success' &&
             Number.isFinite(geo.lat) && Number.isFinite(geo.lon) && Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180) {
+          located = true;
           setHomeLocation({ lat: geo.lat, lng: geo.lon });
+        } else {
+          landSomewhere();
         }
       })
-      .catch(() => { /* silent — stay on the globe */ });
+      .catch(landSomewhere);
 
     return () => {
+      clearTimeout(geoGiveUp);
       geoController.abort();
       window.removeEventListener('pointerdown', cancelAutoLocate);
       window.removeEventListener('keydown', cancelAutoLocate);
