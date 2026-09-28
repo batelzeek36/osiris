@@ -144,8 +144,8 @@ const newsTransform = (d: { news?: unknown[]; sources?: unknown[]; timestamp?: s
   alert_pins: (d.news ?? []).filter(n => (n as { place?: unknown } | null)?.place),
 });
 
-/* One version label. The splash said V4.2 while the header said V.4.1. */
-const APP_VERSION = 'V4.2';
+/* One version label for the splash and the header, which used to disagree. */
+const APP_VERSION = 'V5.0';
 
 /* The splash reports what has actually happened. The last stage waits for
    the map's first finished frame instead of a fixed timer. */
@@ -178,8 +178,10 @@ export default function Dashboard() {
   const [splashStage, setSplashStage] = useState(0);
   const [mapReady, setMapReady] = useState(false);
   const revealed = !showSplash;
+  /* True once the splash has finished fading out, not merely started to. */
+  const [splashGone, setSplashGone] = useState(false);
   /* Where the viewer is, by IP. Asked for at once; the camera flies there
-     when the splash lifts. */
+     once the splash has gone. */
   const [homeLocation, setHomeLocation] = useState<{ lat: number; lng: number } | null>(null);
   const autoLocateCancelled = useRef(false);
 
@@ -328,7 +330,9 @@ export default function Dashboard() {
     jets: false,
     military: false,
     maritime: true,
-    satellites: false,
+    // On from the start: the orbiting fleet around the globe is the first
+    // thing the splash lifts onto.
+    satellites: true,
     sat_comms: false,
     sat_military: false,
     sat_navigation: false,
@@ -402,11 +406,14 @@ export default function Dashboard() {
     return () => clearTimeout(t);
   }, [splashStage]);
 
-  // Fly from the globe down to the viewer's city as the splash lifts.
+  /* Fly from the globe down to the viewer's city once the splash has gone.
+     Starting as it began to fade meant a busy first load (the satellite
+     catalogue is ~19k objects) could hold the fade until the camera was
+     nearly at street level, and the globe was never seen. */
   useEffect(() => {
-    if (!revealed || !homeLocation || autoLocateCancelled.current) return;
+    if (!splashGone || !homeLocation || autoLocateCancelled.current) return;
     setFlyToLocation({ ...homeLocation, zoom: 8, duration: 3500, ts: Date.now() });
-  }, [revealed, homeLocation]);
+  }, [splashGone, homeLocation]);
 
   // On mount: restore layers, probe optional feeds, and geolocate by IP
   useEffect(() => {
@@ -1032,7 +1039,7 @@ export default function Dashboard() {
     <main className="fixed inset-0 w-full h-full bg-[var(--bg-void)] overflow-hidden">
 
       {/* ── SPLASH ── */}
-      <AnimatePresence>
+      <AnimatePresence onExitComplete={() => setSplashGone(true)}>
         {showSplash && (
           <motion.div
             initial={{ opacity: 1 }}
