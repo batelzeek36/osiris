@@ -110,12 +110,15 @@ const COUNTY_ID = /^[a-z-]{2,40}$/;
 export async function fetchTrafikverketCameras(): Promise<CctvCamera[]> {
   const counties = (await kollaPost('/api/v1/counties', '')) as { result?: { id?: unknown; name?: unknown }[] };
   const list = (counties?.result ?? []).filter(c => typeof c?.id === 'string' && COUNTY_ID.test(c.id));
-  // 21 counties; four at a time is polite to a small site and still ~2s.
+  // 21 counties; four at a time is polite to a small site and still ~3s.
   const pool = createPool(4);
-  const perCounty = await Promise.all(list.map(c => pool.run(() =>
+  const county = (c: { id?: unknown; name?: unknown }) =>
     kollaPost('/api/v1/cameras', `county=${encodeURIComponent(c.id as string)}`)
-      .then(raw => parseKollaCameras(raw, countyLabel(c.name)))
-      .catch(() => [] as CctvCamera[]),
+      .then(raw => parseKollaCameras(raw, countyLabel(c.name)));
+  /* One retry: a single slow county otherwise drops its cameras from the
+     catalogue until the next refresh, half an hour later. */
+  const perCounty = await Promise.all(list.map(c => pool.run(() =>
+    county(c).catch(() => county(c)).catch(() => [] as CctvCamera[]),
   )));
   const byId = new Map<string, CctvCamera>();
   for (const cam of perCounty.flat()) byId.set(cam.id, cam);
@@ -138,10 +141,21 @@ export interface CamStreamerEntry {
   embed: string;
 }
 
-/** "MEDview: Kåsa Strand, Varberg" → "Varberg"; nothing usable → "Sweden". */
-function placeFrom(name: string): string {
-  const tail = name.split(',').pop()?.trim() ?? '';
-  return name.includes(',') && tail.length > 1 && tail.length <= 30 ? tail : 'Sweden';
+/**
+ * The place a stream's name ends with, or "Sweden":
+ *   "MEDview: Kåsa Strand, Varberg"          → "Varberg"
+ *   "Stormhuset, Apelviken, Varberg Sweden"  → "Varberg"
+ *   "Rengsfallet, Valsjöbyn – Live"          → "Valsjöbyn"
+ *   "…live 24/7 from Löddeköpinge, Sweden"   → "Sweden" (left to placeStreams)
+ */
+export function placeFrom(name: string): string {
+  if (!name.includes(',')) return 'Sweden';
+  const tail = (name.split(',').pop() ?? '')
+    .trim()
+    .replace(/\s*[–-]\s*live$/i, '')
+    .replace(/\s*\bsweden$/i, '')
+    .trim();
+  return tail.length > 1 && tail.length <= 30 ? tail : 'Sweden';
 }
 
 export function parseCamStreamer(raw: unknown): CamStreamerEntry[] {
@@ -204,11 +218,34 @@ export async function fetchCamStreamerSweden(): Promise<CctvCamera[]> {
 
 /* ── Region ──────────────────────────────────────────────────── */
 
+/** Rough distance in km — plenty to find which county a stream sits in. */
+function kmBetween(a: CctvCamera, b: CctvCamera): number {
+  const dLat = (a.lat - b.lat) * 111;
+  const dLng = (a.lng - b.lng) * 111 * Math.cos((a.lat * Math.PI) / 180);
+  return Math.hypot(dLat, dLng);
+}
+
+/**
+ * A stream whose name carries no place ("Hertingforsen Falkenberg") would
+ * read "Sweden, Sweden" in the viewer. It takes the county of the nearest
+ * road camera instead, when one is close enough to vouch for it — 60 km,
+ * because the north has so few road cameras that further than that the
+ * nearest one can sit in the wrong county.
+ */
+export function placeStreams(streams: CctvCamera[], roads: CctvCamera[], maxKm = 60): CctvCamera[] {
+  return streams.map(stream => {
+    if (stream.city !== 'Sweden' || !roads.length) return stream;
+    let nearest = roads[0];
+    for (const road of roads) if (kmBetween(stream, road) < kmBetween(stream, nearest)) nearest = road;
+    return kmBetween(stream, nearest) <= maxKm ? { ...stream, city: nearest.city } : stream;
+  });
+}
+
 export async function fetchSwedenCameras(): Promise<CctvCamera[]> {
   // Either source failing must not take the other down with it.
   const [roads, streams] = await Promise.all([
     fetchTrafikverketCameras().catch(() => [] as CctvCamera[]),
     fetchCamStreamerSweden().catch(() => [] as CctvCamera[]),
   ]);
-  return [...roads, ...streams];
+  return [...roads, ...placeStreams(streams, roads)];
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { countyLabel, parseKollaCameras, parseCamStreamer, fetchSwedenCameras } from './sweden';
+import { countyLabel, parseKollaCameras, parseCamStreamer, placeFrom, placeStreams, fetchSwedenCameras } from './sweden';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -88,6 +88,35 @@ describe('parseCamStreamer', () => {
   });
 });
 
+describe('placeFrom', () => {
+  it('takes the place a stream name ends with, minus the noise', () => {
+    expect(placeFrom('MEDview: Kåsa Strand, Varberg')).toBe('Varberg');
+    expect(placeFrom('Stormhuset, Apelviken, Varberg Sweden')).toBe('Varberg');
+    expect(placeFrom('Rengsfallet, Valsjöbyn – Live')).toBe('Valsjöbyn');
+  });
+
+  it('gives up rather than guess', () => {
+    expect(placeFrom('AXIS Q1952-E Thermal Camera streaming live 24/7 from Löddeköpinge, Sweden')).toBe('Sweden');
+    expect(placeFrom('Hertingforsen Falkenberg')).toBe('Sweden');
+  });
+});
+
+describe('placeStreams', () => {
+  const road = parseKollaCameras([kolla({ id: 1, lat: 56.9, lng: 12.5 })], 'Halland')[0];
+  const stream = (lat: number, lng: number, city = 'Sweden') =>
+    ({ ...parseCamStreamer({ videos: [video({ lat, lng })] })[0].camera, city });
+
+  it('names a placeless stream after the nearest road camera’s county', () => {
+    expect(placeStreams([stream(56.9, 12.49)], [road])[0].city).toBe('Halland');
+  });
+
+  it('keeps a place the stream already names, and anything too far to vouch for', () => {
+    expect(placeStreams([stream(56.9, 12.49, 'Varberg')], [road])[0].city).toBe('Varberg');
+    expect(placeStreams([stream(68.4, 18.8)], [road])[0].city).toBe('Sweden');
+    expect(placeStreams([stream(56.9, 12.49)], [])[0].city).toBe('Sweden');
+  });
+});
+
 describe('fetchSwedenCameras', () => {
   const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
 
@@ -119,6 +148,17 @@ describe('fetchSwedenCameras', () => {
     vi.stubGlobal('fetch', upstreams({ redirectTo: 'https://camstreamer.com/offline' }));
     const stream = (await fetchSwedenCameras()).find(c => c.source === 'CamStreamer');
     expect(stream?.stream_url).toBe('https://camstreamer.com/embed/jDdxPrkdNJg6ua3lPTI85LqHPO1dRtzn0CtKNpY7');
+  });
+
+  it('retries a county once before giving its cameras up', async () => {
+    let cameraCalls = 0;
+    const base = upstreams();
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/api/v1/cameras') && cameraCalls++ === 0) return new Response('', { status: 504 });
+      return base(input);
+    }));
+    expect((await fetchSwedenCameras()).filter(c => c.source === 'Trafikverket')).toHaveLength(1);
+    expect(cameraCalls).toBe(2);
   });
 
   it('still returns the live streams when the road-camera list is down', async () => {
