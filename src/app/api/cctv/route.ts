@@ -593,6 +593,14 @@ const REGION_CONCURRENCY = 4;
 const regionPool = createPool(REGION_CONCURRENCY);
 
 /**
+ * Regions whose upstream is timing out or returning empty get a cooldown so
+ * they stop burning pool slots every 60 seconds.  The cooldown is lifted once
+ * the backoff window expires, letting the next scheduled refresh try again.
+ */
+const BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
+const backedOff = new Map<string, number>();
+
+/**
  * One refresh per region at a time, and never an unbounded slot.
  *
  * A pool slot held by an upstream that never answers is worse than the storm
@@ -607,24 +615,38 @@ const refreshing = new Map<string, Promise<any[]>>();
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function refreshRegion(region: string): Promise<any[]> {
+  /* If this region recently timed out, skip it entirely until the backoff
+     window expires.  This stops a down upstream from burning a pool slot
+     every 60s and clogging the event loop with 12s waits. */
+  const cooldownUntil = backedOff.get(region);
+  if (cooldownUntil && Date.now() < cooldownUntil) {
+    return Promise.resolve([]);
+  }
+
   const existing = refreshing.get(region);
   if (existing) return existing;
 
   const started = regionPool.run(async () => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
       return await Promise.race([
         REGION_FETCHERS[region](),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         new Promise<any[]>(resolve => {
           timer = setTimeout(() => {
-            console.warn(`[OSIRIS] cctv:${region} over ${REGION_BUDGET_MS}ms — freeing its slot`);
+            timedOut = true;
+            console.warn(`[OSIRIS] cctv:${region} over ${REGION_BUDGET_MS}ms — backing off for 300s`);
+            backedOff.set(region, Date.now() + BACKOFF_MS);
             resolve([]);
           }, REGION_BUDGET_MS);
         }),
       ]);
     } finally {
       clearTimeout(timer);
+      /* If the fetch succeeded (did not time out), clear any lingering backoff
+         so a recovered upstream is used immediately. */
+      if (!timedOut) backedOff.delete(region);
     }
   }).finally(() => { refreshing.delete(region); });
 
