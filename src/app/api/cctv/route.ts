@@ -24,6 +24,7 @@ import { fetchPolandCameras } from './poland';
 import { fetchJapanCameras } from './japan';
 import { fetchSwitzerlandCameras } from './switzerland';
 import { fetchFinlandCameras } from './finland';
+import { fetchSwedenCameras } from './sweden';
 import { fetchHongKongCameras } from './hongkong';
 import { fetchUtahCameras } from './utah';
 import { fetchIcelandCameras } from './iceland';
@@ -505,6 +506,7 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'japan': fetchJapanCameras,
   'switzerland': fetchSwitzerlandCameras,
   'finland': fetchFinlandCameras,
+  'sweden': fetchSwedenCameras,
   'hongkong': fetchHongKongCameras,
   'utah': fetchUtahCameras,
   'iceland': fetchIcelandCameras,
@@ -874,6 +876,9 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   if (inSpain) regions.push('spain');
   if (inPoland) regions.push('poland');
   if (inFinland) regions.push('finland');
+  /* Not folded into inWesternEurope: Sweden's box overlaps Norway, and
+     the broad 'europe' region must still load there. */
+  if (lat > 55.0 && lat < 69.2 && lng > 10.5 && lng < 24.3) regions.push('sweden');
   if (inIceland) regions.push('iceland');
   if (inLithuania) regions.push('lithuania');
 
