@@ -23,6 +23,12 @@ services:
       - HOSTNAME=0.0.0.0
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Camera catalogue + geocoder snapshots (/app/.cache) and the satellite
+    # TLE cache (/app/.next/cache) persist across restarts and rebuilds, so a
+    # new container starts warm instead of re-fetching every region.
+    volumes:
+      - osiris-data:/app/.cache
+      - osiris-next-cache:/app/.next/cache
     restart: unless-stopped
     networks:
       - default
@@ -54,6 +60,8 @@ services:
 
 volumes:
   nginx-cache:
+  osiris-data:
+  osiris-next-cache:
 
 # ── CasaOS app-store metadata (ignored by plain Docker Compose) ──
 x-casaos:
