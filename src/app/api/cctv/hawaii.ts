@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { stealthFetch } from '@/lib/stealthFetch';
 import { cachedSource } from '@/lib/sourceCache';
 import { createPool } from '@/lib/fetch-pool';
@@ -262,6 +263,119 @@ export function keepLiveStreams(cams: CctvCamera[], live: ReadonlySet<string>): 
   });
 }
 
+/*
+ * Stills. A GoAkamai camera that has stopped sending frames still answers
+ * 200 image/jpeg, so a status check proves nothing: the picture has to be
+ * judged. Measured across all 336 cameras at 320x240 on 2026-09-30, 13:40 HST:
+ *   • 66 returned one byte-identical "GoAkamai — Image Temporarily
+ *     Unavailable" logo, including 26 of Maui's 27 cameras;
+ *   • 4 returned black "No video" frames of 1,940–4,798 bytes;
+ *   • the dimmest real frame was 6,013 bytes, the median 17,325;
+ *   • two cameras are each listed twice, 6 m and 23 m apart, and return
+ *     byte-identical real frames (Nimitz & Pacific, Makakilo & Farrington).
+ * So a frame that other cameras return byte for byte is the placeholder,
+ * unless every copy sits at the same spot, in which case it is one camera
+ * listed twice; and a frame under STILL_BLANK_MAX_BYTES has nothing in it.
+ * The small 320x240 variant is enough to judge and costs ~4 MB a refresh
+ * for all of them, against ~27 MB for the 800-wide one the viewer shows.
+ */
+const STILL_PROBE_CONCURRENCY = 16;
+const STILL_PROBE_BUDGET_MS = 8000;
+export const STILL_BLANK_MAX_BYTES = 5000;
+const SAME_SPOT_METRES = 250;
+
+/** What one still looked like: its size and a digest of its bytes. */
+export interface StillProbe {
+  bytes: number;
+  digest: string;
+}
+
+/** The 320x240 variant of a GoAkamai still, used only to judge it. Exported for tests. */
+export function probeUrlFor(feedUrl: string): string {
+  return feedUrl.replace(/\/SnapShot\/\d+x\d+\//, '/SnapShot/320x240/');
+}
+
+/** Download each camera's small still once; keyed by the camera's feed_url. */
+async function probeStills(feedUrls: string[]): Promise<Map<string, StillProbe>> {
+  const probes = new Map<string, StillProbe>();
+  if (!feedUrls.length) return probes;
+
+  const pool = createPool(STILL_PROBE_CONCURRENCY);
+  const deadline = Date.now() + STILL_PROBE_BUDGET_MS;
+  await Promise.all([...new Set(feedUrls)].map(feedUrl => pool.run(async () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return; // out of time: left unjudged, so kept
+    try {
+      const res = await stealthFetch(probeUrlFor(feedUrl), { signal: AbortSignal.timeout(remaining) });
+      if (!res.ok) return;
+      const body = Buffer.from(await res.arrayBuffer());
+      probes.set(feedUrl, { bytes: body.length, digest: createHash('sha1').update(body).digest('hex') });
+    } catch {
+      // Unreachable, or cut off by the budget: unjudged, so kept.
+    }
+  })));
+  return probes;
+}
+
+function metresApart(a: CctvCamera, b: CctvCamera): number {
+  const dy = (a.lat - b.lat) * 111_320;
+  const dx = (a.lng - b.lng) * 111_320 * Math.cos((a.lat * Math.PI) / 180);
+  return Math.hypot(dx, dy);
+}
+
+/**
+ * Which stills are dead and which cameras are a second listing of another.
+ * Cameras without a probe are unjudged and appear in neither set. Exported for tests.
+ */
+export function judgeStills(
+  cams: CctvCamera[],
+  probes: ReadonlyMap<string, StillProbe>,
+): { deadStills: Set<string>; duplicates: Set<string> } {
+  const deadStills = new Set<string>();
+  const duplicates = new Set<string>();
+  const byDigest = new Map<string, CctvCamera[]>();
+
+  for (const cam of cams) {
+    const probe = cam.feed_url ? probes.get(cam.feed_url) : undefined;
+    if (!probe) continue;
+    if (probe.bytes < STILL_BLANK_MAX_BYTES) {
+      deadStills.add(cam.id);
+      continue;
+    }
+    byDigest.set(probe.digest, [...(byDigest.get(probe.digest) ?? []), cam]);
+  }
+
+  for (const group of byDigest.values()) {
+    if (group.length < 2) continue;
+    const sameSpot = group.every(cam => metresApart(cam, group[0]) <= SAME_SPOT_METRES);
+    if (!sameSpot) {
+      for (const cam of group) deadStills.add(cam.id);
+      continue;
+    }
+    // One camera listed more than once: keep a listing with video, if any.
+    const keep = group.find(cam => cam.stream_url) ?? group[0];
+    for (const cam of group) if (cam !== keep) duplicates.add(cam.id);
+  }
+  return { deadStills, duplicates };
+}
+
+/**
+ * Drop second listings; take the dead still off a camera whose video works,
+ * and drop a camera left with neither. Exported for tests.
+ */
+export function keepRealStills(
+  cams: CctvCamera[],
+  verdict: { deadStills: ReadonlySet<string>; duplicates: ReadonlySet<string> },
+): CctvCamera[] {
+  return cams.flatMap(cam => {
+    if (verdict.duplicates.has(cam.id)) return [];
+    if (!verdict.deadStills.has(cam.id)) return [cam];
+    const video: CctvCamera = { ...cam };
+    delete video.feed_url;
+    return video.stream_url ? [video] : [];
+  });
+}
+
 async function loadGoAkamaiCameras(): Promise<CctvCamera[]> {
   const res = await stealthFetch(GOAKAMAI_CAMERAS, {
     signal: AbortSignal.timeout(15000),
@@ -270,9 +384,17 @@ async function loadGoAkamaiCameras(): Promise<CctvCamera[]> {
   if (!res.ok) throw new Error(`GoAkamai HTTP ${res.status}`);
   const listed = mapGoAkamaiInventory(await res.json());
   const streams = listed.flatMap(cam => cam.stream_url ? [cam.stream_url] : []);
-  const live = await confirmLiveStreams(streams);
-  const cams = keepLiveStreams(listed, live);
-  console.log(`[OSIRIS] Hawaii cameras — GoAkamai: ${cams.length} (${live.size}/${streams.length} streams live)`);
+  const stills = listed.flatMap(cam => cam.feed_url ? [cam.feed_url] : []);
+  // Both checks go to GoAkamai's CDN and each is bounded on its own, so they run side by side.
+  const [live, probes] = await Promise.all([confirmLiveStreams(streams), probeStills(stills)]);
+  const withVideo = keepLiveStreams(listed, live);
+  const verdict = judgeStills(withVideo, probes);
+  const cams = keepRealStills(withVideo, verdict);
+  console.log(
+    `[OSIRIS] Hawaii cameras — GoAkamai: ${cams.length} of ${listed.length} ` +
+    `(${live.size}/${streams.length} streams live, ${verdict.deadStills.size} dead stills, ` +
+    `${verdict.duplicates.size} duplicate listings, ${probes.size}/${stills.length} stills judged)`,
+  );
   return cams;
 }
 
