@@ -760,9 +760,13 @@ export async function warmCctvCatalog() {
   await persistCatalogue();
 }
 
-/** Test seam — drops queued refreshes between cases. */
+/** Test seam — drops queued refreshes and region cooldowns between cases. */
 export function clearCctvRefreshes() {
   refreshing.clear();
+  /* A region that timed out in one case stayed in cooldown for the next: the
+     fake clock restarts at real time, well inside the 5-minute window, so a
+     later case asking for that region got nothing without going upstream. */
+  backedOff.clear();
   regionPool.reset();
   restoring = undefined;
   clearPayload();
