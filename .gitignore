@@ -67,3 +67,8 @@ scanner_backend_backup.js
 # Local checkouts of third-party tools; not part of this app
 /scratch/astra/
 /scratch/mast3r/
+
+# fork: never track dependency trees or Python bytecode at any depth
+node_modules/
+__pycache__/
+*.pyc
