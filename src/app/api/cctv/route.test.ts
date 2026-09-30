@@ -101,6 +101,28 @@ describe('CCTV partial responses', () => {
     expect(body.pendingRegions).toEqual(['uk']);
   });
 
+  /* Before Hawaii had a region, a viewport over Hilo matched no box and fell
+     through to the default — London and the US east coast. */
+  it('routes a Big Island viewport to the Hawaii region', async () => {
+    vi.mocked(stealthFetch).mockImplementation(async (url) => {
+      if (!String(url).startsWith('https://a.cameraservice.goakamai.org/')) return new Response('', { status: 503 });
+      return Response.json([{
+        id: 'TL-0322',
+        status: 'OK',
+        description: 'H-1 - East of Honouliuli Stream 1',
+        location: { coordinates: { latitude: 21.3786449, longitude: -158.040771 } },
+        images: [{ status: 'OK', type: 'SnapShot', width: 800, URL: 'http://cctv.cdn.goakamai.org/SnapShot/800x600/TL-0322.jpg' }],
+      }]);
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const body = await (await GET(new Request('http://localhost/api/cctv?lat=19.7241&lng=-155.0868'))).json();
+    expect(body.regions).toEqual(['hawaii']);
+    expect(body.cameras.map((c: { id: string }) => c.id)).toEqual(['goakamai-TL-0322']);
+    vi.restoreAllMocks();
+  });
+
   it('allows a bounded retry for an empty/failed provider response', async () => {
     vi.mocked(stealthFetch).mockResolvedValue(new Response('', { status: 503 }));
     const response = await GET(new Request('http://localhost/api/cctv?region=uk'));

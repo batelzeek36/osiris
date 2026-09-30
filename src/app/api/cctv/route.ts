@@ -38,6 +38,7 @@ import { fetchOregonCameras } from './oregon';
 import { fetchMichiganCameras } from './michigan';
 import { fetchIndianaCameras } from './indiana';
 import { fetchNevadaCameras } from './nevada';
+import { fetchHawaiiCameras } from './hawaii';
 import { fetchLouisianaCameras } from './louisiana';
 import { fetchFloridaCameras } from './florida';
 import { fetchGeorgiaCameras } from './georgia';
@@ -520,6 +521,7 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'michigan': fetchMichiganCameras,
   'indiana': fetchIndianaCameras,
   'nevada': fetchNevadaCameras,
+  'hawaii': fetchHawaiiCameras,
   'louisiana': fetchLouisianaCameras,
   'florida': fetchFloridaCameras,
   'georgia': fetchGeorgiaCameras,
@@ -823,6 +825,8 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   if (lat > 41.9 && lat < 46.3 && lng > -124.6 && lng < -116.4) regions.push('oregon');
   // Nevada (NDOT) — explicit, since us-west only covers WA + CA
   if (lat > 34.9 && lat < 42.1 && lng > -120.1 && lng < -113.9) regions.push('nevada');
+  // Hawaii (GoAkamai + USGS HVO) — every main island, Niihau through Hawaii Island
+  if (lat > 18.8 && lat < 22.3 && lng > -160.3 && lng < -154.7) regions.push('hawaii');
   // Texas (TxDOT), including El Paso west of the central region.
   if (lat > 25.8 && lat < 36.6 && lng > -106.7 && lng < -93.4) regions.push('texas');
   // US-Central
