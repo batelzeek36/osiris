@@ -3,7 +3,11 @@ import {
   confirmLiveStreams,
   fetchHawaiiCameras,
   goAkamaiHeaders,
+  judgeStills,
   keepLiveStreams,
+  keepRealStills,
+  probeUrlFor,
+  STILL_BLANK_MAX_BYTES,
   islandFor,
   mapAshCamInventory,
   mapAshCamWebcam,
@@ -12,6 +16,7 @@ import {
   type AshCamWebcam,
   type GoAkamaiCameraRecord,
 } from './hawaii';
+import type { CctvCamera } from './types';
 import { stealthFetch } from '@/lib/stealthFetch';
 import { clearSourceCache } from '@/lib/sourceCache';
 
@@ -313,11 +318,98 @@ describe('fetchHawaiiCameras', () => {
   });
 });
 
+describe('judging GoAkamai stills', () => {
+  const cam = (id: string, lat: number, lng: number, extra: Partial<CctvCamera> = {}): CctvCamera => ({
+    id, lat, lng, name: id, city: 'Oahu', country: 'US', source: 'GoAkamai',
+    feed_url: `https://cctv.cdn.goakamai.org/SnapShot/800x600/${id}.jpg`, ...extra,
+  });
+  const probe = (digest: string, bytes = 17_325) => ({ digest, bytes });
+
+  it('judges the small variant of a still', () => {
+    expect(probeUrlFor('https://cctv.cdn.goakamai.org/SnapShot/800x600/TL-0822.jpg'))
+      .toBe('https://cctv.cdn.goakamai.org/SnapShot/320x240/TL-0822.jpg');
+  });
+
+  it('calls a frame shared by cameras kilometres apart the placeholder', () => {
+    const a = cam('TL-0217', 21.2787, -157.8155);
+    const b = cam('TL-0200', 21.2862, -157.8255); // ~1.3 km away
+    const c = cam('TL-0322', 21.3786, -158.0408);
+    const probes = new Map([[a.feed_url!, probe('logo', 11_841)], [b.feed_url!, probe('logo', 11_841)], [c.feed_url!, probe('street')]]);
+    expect(judgeStills([a, b, c], probes)).toEqual({ deadStills: new Set(['TL-0217', 'TL-0200']), duplicates: new Set() });
+  });
+
+  it('calls a frame under the blank threshold dead, however unique', () => {
+    const a = cam('TL-0119', 21.33, -157.86);
+    expect(judgeStills([a], new Map([[a.feed_url!, probe('black', STILL_BLANK_MAX_BYTES - 1)]])).deadStills).toEqual(new Set(['TL-0119']));
+  });
+
+  it('treats an identical frame at the same spot as one camera listed twice, keeping the listing with video', () => {
+    const a = cam('TL-0137', 21.3080, -157.8662);
+    const b = cam('TL-0370', 21.30805, -157.86615, { stream_url: 'https://cdn3.wowza.com/5/x/TL-0370.stream/playlist.m3u8', stream_type: 'hls' });
+    const probes = new Map([[a.feed_url!, probe('nimitz')], [b.feed_url!, probe('nimitz')]]);
+    expect(judgeStills([a, b], probes)).toEqual({ deadStills: new Set(), duplicates: new Set(['TL-0137']) });
+  });
+
+  it('leaves unjudged cameras alone', () => {
+    expect(judgeStills([cam('TL-0001', 21.3, -157.8)], new Map())).toEqual({ deadStills: new Set(), duplicates: new Set() });
+  });
+
+  it('keeps working video without its dead still, and drops a camera left with nothing', () => {
+    const video = cam('TL-0001', 21.3, -157.8, { stream_url: 'https://cdn3.wowza.com/5/x/TL-0001.stream/playlist.m3u8', stream_type: 'hls' });
+    const stillOnly = cam('TL-0822', 20.8369, -156.3297, { city: 'Maui' });
+    const dup = cam('TL-0370', 21.3, -157.8);
+    const fine = cam('TL-0322', 21.3786, -158.0408);
+    const kept = keepRealStills([video, stillOnly, dup, fine], {
+      deadStills: new Set(['TL-0001', 'TL-0822']),
+      duplicates: new Set(['TL-0370']),
+    });
+    expect(kept.map(c => c.id)).toEqual(['TL-0001', 'TL-0322']);
+    expect(kept[0].feed_url).toBeUndefined();
+    expect(kept[0].stream_url).toBe(video.stream_url);
+    expect(kept[1]).toEqual(fine);
+  });
+});
+
+describe('fetchHawaiiCameras with dead stills', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    clearSourceCache();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); clearSourceCache(); });
+
+  it('drops still-only cameras that serve the shared placeholder and keeps the real one', async () => {
+    const logo = new Uint8Array(11_841).fill(7);
+    const street = new Uint8Array(17_325).fill(9);
+    const mauiTwo: GoAkamaiCameraRecord = {
+      ...maui,
+      id: 'TL-0822',
+      description: 'Haleakala Hwy at Makawao Ave',
+      location: { coordinates: { latitude: 20.836895, longitude: -156.329727 }, facility: { roadName: 'Haleakala Hwy' } },
+      images: maui.images!.map(img => ({ ...img, URL: img.URL?.replace('TL-0801', 'TL-0822') })),
+    };
+    const small = (id: string) => `https://cctv.cdn.goakamai.org/SnapShot/320x240/${id}.jpg`;
+    upstreams({
+      goakamai: Response.json([oahu, maui, mauiTwo]),
+      playlists: {
+        [OAHU_STREAM]: new Response(PLAYLIST),
+        [small('TL-0322')]: new Response(street),
+        [small('TL-0801')]: new Response(logo),
+        [small('TL-0822')]: new Response(logo),
+      },
+    });
+    const cams = await fetchHawaiiCameras();
+    expect(cams.map(c => c.id)).toEqual(['goakamai-TL-0322']);
+  });
+});
+
 it.skipIf(!process.env.RUN_LIVE_TESTS)('loads live Hawaii cameras from GoAkamai', async () => {
   const { stealthFetch: real } = await vi.importActual<typeof import('@/lib/stealthFetch')>('@/lib/stealthFetch');
   vi.mocked(stealthFetch).mockImplementation(real);
   clearSourceCache();
   const cameras = await fetchHawaiiCameras();
   expect(cameras.filter(c => c.city === 'Oahu').length).toBeGreaterThan(100);
-  expect(cameras.some(c => c.city === 'Maui')).toBe(true);
+  // Not asserting Maui: on 2026-09-30 26 of its 27 cameras served the placeholder
+  // and are dropped, so its count rides on one camera's health.
 }, 30_000);
