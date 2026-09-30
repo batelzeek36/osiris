@@ -44,6 +44,8 @@ import { fetchGeorgiaCameras } from './georgia';
 import { fetchNorthCarolinaCameras } from './northcarolina';
 import { fetchArizonaCameras } from './arizona';
 import { fetchTexasCameras } from './texas';
+import { fetchWashingtonCameras } from './washington';
+import { fetchIllinoisCameras } from './illinois';
 import { fetchEastAsiaCameras, fetchSeAsiaCameras, fetchWestAsiaCameras } from './opencctv';
 import {
   fetchLatamLiveCameras,
@@ -82,20 +84,6 @@ async function fetchTfLCameras(): Promise<any[]> {
         source: 'TfL',
       };
     }).filter((c: any) => c.lat && c.lng);
-  } catch (e) { return []; }
-}
-
-// ── US-WEST: WSDOT Washington State (~500) ──
-async function fetchWSDOTCameras(): Promise<any[]> {
-  try {
-    const res = await stealthFetch('https://data.wsdot.wa.gov/log/public/cameras.json', { signal: AbortSignal.timeout(12000) });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return (data || []).map((cam: any) => ({
-      id: `wsdot-${cam.CameraID}`, lat: cam.CameraLocation?.Latitude, lng: cam.CameraLocation?.Longitude,
-      name: cam.Title || 'WSDOT Camera', city: 'Washington', country: 'US',
-      feed_url: cam.ImageURL || '', source: 'WSDOT',
-    })).filter((c: any) => c.lat && c.lng && c.feed_url);
   } catch (e) { return []; }
 }
 
@@ -311,32 +299,6 @@ async function fetchCanadaCameras(): Promise<any[]> {
   return cams.filter((c: any) => c.lat && c.lng);
 }
 
-// ── US-CENTRAL: Chicago, Houston, Dallas, Denver ──
-async function fetchUSCentralCameras(): Promise<any[]> {
-  const cams: any[] = [];
-  // Illinois DOT
-  {
-    const data = await subSource('IDOT', 'https://www.travelmidwest.com/lmiga/cameraReport.json', 8000);
-    if (data) {
-      /* travelmidwest answers 200 with {updatedMessage, noDataMessage} and no
-         cameras at all — an object, not the array this assumed. That threw a
-         TypeError the old silent catch quietly absorbed; now it would take
-         us-central down with it, so the shape is checked. */
-      const rows = Array.isArray(data?.cameraReports) ? data.cameraReports : Array.isArray(data) ? data : [];
-      for (const cam of rows.slice(0, 800)) {
-        if (!cam.latitude || !cam.longitude) continue;
-        cams.push({
-          id: `ildot-${cams.length}`, lat: cam.latitude, lng: cam.longitude,
-          name: cam.cameraName || cam.description || 'IDOT Camera', city: 'Illinois', country: 'US',
-          feed_url: cam.imageUrl || cam.url || '', source: 'IDOT',
-        });
-      }
-    }
-  }
-
-  return cams.filter((c: any) => c.lat && c.lng);
-}
-
 // ── US-EAST: OH, DC, Florida, Georgia ──
 async function fetchUSEastCameras(): Promise<any[]> {
   const cams: any[] = [];
@@ -482,9 +444,10 @@ type RegionFetcher = () => Promise<any[]>;
 const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'middle-east': fetchMiddleEastCameras,
   'uk': fetchTfLCameras,
-  'us-west': async () => { const [w, c] = await Promise.all([fetchWSDOTCameras(), fetchCaltransCameras()]); return [...w, ...c]; },
+  'us-west': async () => { const [w, c] = await Promise.all([fetchWashingtonCameras(), fetchCaltransCameras()]); return [...w, ...c]; },
   'us-east': fetchUSEastCameras,
-  'us-central': fetchUSCentralCameras,
+  // Illinois only, as before: IDOT's Gateway layer (./illinois) replaced the dead travelmidwest report.
+  'us-central': fetchIllinoisCameras,
   'canada': fetchCanadaCameras,
   'europe': fetchEuropeCameras,
   'netherlands': fetchNetherlandsCameras,

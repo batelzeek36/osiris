@@ -20,6 +20,13 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# /app itself is root-owned, so the app could not create its snapshot dir
+# (EACCES on /app/.cache) and every restart re-fetched every camera region
+# from cold. Pre-create both cache dirs owned by the app user; docker-compose
+# mounts named volumes over them so the snapshots survive a rebuild too.
+RUN mkdir -p /app/.cache /app/.next/cache && \
+    chown nextjs:nodejs /app/.cache /app/.next/cache
+
 USER nextjs
 EXPOSE 3000
 ENV PORT=3000
