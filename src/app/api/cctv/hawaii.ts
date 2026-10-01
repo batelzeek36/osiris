@@ -3,6 +3,7 @@ import { stealthFetch } from '@/lib/stealthFetch';
 import { cachedSource } from '@/lib/sourceCache';
 import { createPool } from '@/lib/fetch-pool';
 import type { CctvCamera } from './types';
+import { fetchBigIslandCameras } from './bigisland';
 
 /**
  * OSIRIS — Hawaii CCTV Cameras
@@ -493,7 +494,9 @@ async function loadAshCamCameras(): Promise<CctvCamera[]> {
    non-empty result as a success. */
 const sourceFetchers = [
   cachedSource('hawaii:goakamai', loadGoAkamaiCameras),
-  cachedSource('hawaii:usgs-hvo', loadAshCamCameras),
+  // Hawaii Island: USGS HVO volcano webcams placed where USGS says they are,
+  // plus the Mauna Kea and Mauna Loa observatory cameras (bigisland.ts).
+  fetchBigIslandCameras,
 ];
 
 export async function fetchHawaiiCameras(): Promise<CctvCamera[]> {
