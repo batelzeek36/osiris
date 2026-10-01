@@ -9,14 +9,12 @@ import {
   probeUrlFor,
   STILL_BLANK_MAX_BYTES,
   islandFor,
-  mapAshCamInventory,
-  mapAshCamWebcam,
   mapGoAkamaiCamera,
   mapGoAkamaiInventory,
-  type AshCamWebcam,
   type GoAkamaiCameraRecord,
 } from './hawaii';
 import type { CctvCamera } from './types';
+import type { AshCamRecord } from './bigisland';
 import { stealthFetch } from '@/lib/stealthFetch';
 import { clearSourceCache } from '@/lib/sourceCache';
 
@@ -52,9 +50,8 @@ const maui: GoAkamaiCameraRecord = {
   ],
 };
 
-/** HVO's KWcam as the AshCam index listed it on 2026-09-30. */
-const NOW_MS = 1790803442 * 1000;
-const kwcam: AshCamWebcam = {
+/** HVO's KWcam as the AshCam index listed it on 2026-09-30; bigisland.ts reads this index now. */
+const kwcam: AshCamRecord = {
   webcamCode: 'kilauea-kw-cam',
   webcamName: 'Kilauea - KW Cam',
   latitude: 19.421,
@@ -158,56 +155,6 @@ describe('islandFor', () => {
     expect(islandFor(21.0906, -157.0226)).toBe('Molokai'); // Kaunakakai
     expect(islandFor(20.8275, -156.9205)).toBe('Lanai'); // Lanai City
     expect(islandFor(21.5, -158.8)).toBe('Hawaii'); // Kaieiewaho Channel
-  });
-});
-
-describe('mapAshCamWebcam', () => {
-  it('maps an HVO webcam to its medium still and its USGS page', () => {
-    expect(mapAshCamWebcam(kwcam, NOW_MS)).toEqual({
-      id: 'usgs-hvo-kilauea-kw-cam',
-      lat: 19.421,
-      lng: -155.287,
-      name: 'Kilauea - KW Cam',
-      city: 'Kilauea',
-      country: 'US',
-      feed_url: 'https://volcview.wr.usgs.gov/ashcam-api/images/webcams/kilauea-kw-cam/current-medium.jpg',
-      external_url: 'https://volcanoes.usgs.gov/observatories/hvo/cams/panorama.php?cam=KWcam',
-      source: 'USGS HVO',
-    });
-  });
-
-  it('falls back to the full still, and to the island when no volcano is named', () => {
-    const cam = mapAshCamWebcam({ ...kwcam, currentMediumImageUrl: null, vName: null, externalUrl: null }, NOW_MS);
-    expect(cam?.feed_url).toBe('https://volcview.wr.usgs.gov/ashcam-api/images/webcams/kilauea-kw-cam/current.jpg');
-    expect(cam?.city).toBe('Hawaii Island');
-    expect(cam?.external_url).toBeUndefined();
-  });
-
-  it('skips cameras USGS has not placed, outside Hawaii, imageless, quiet, or off usgs.gov', () => {
-    expect(mapAshCamWebcam({ ...kwcam, latitude: 0, longitude: 0 }, NOW_MS)).toBeNull();
-    expect(mapAshCamWebcam({ ...kwcam, latitude: 54.146948, longitude: -165.60517 }, NOW_MS)).toBeNull(); // Akutan, Alaska
-    expect(mapAshCamWebcam({ ...kwcam, hasImages: 'N' }, NOW_MS)).toBeNull();
-    expect(mapAshCamWebcam({ ...kwcam, lastImageTimestamp: 1790803442 - 2 * 24 * 3600 }, NOW_MS)).toBeNull();
-    expect(mapAshCamWebcam({ ...kwcam, lastImageTimestamp: null }, NOW_MS)).toBeNull();
-    expect(mapAshCamWebcam({
-      ...kwcam,
-      currentImageUrl: 'https://example.com/current.jpg',
-      currentMediumImageUrl: 'http://volcview.wr.usgs.gov/current-medium.jpg',
-    }, NOW_MS)).toBeNull();
-    expect(mapAshCamWebcam({ ...kwcam, webcamCode: '' }, NOW_MS)).toBeNull();
-  });
-});
-
-describe('mapAshCamInventory', () => {
-  it('keeps only the Hawaii cameras from the nationwide index', () => {
-    const alaska = { ...kwcam, webcamCode: 'akunIsland-N', latitude: 54.146948, longitude: -165.60517 };
-    const cams = mapAshCamInventory({ webcams: [alaska, kwcam, kwcam], meta: { webcamTotal: 3 } }, NOW_MS);
-    expect(cams.map(c => c.id)).toEqual(['usgs-hvo-kilauea-kw-cam']);
-  });
-
-  it('throws when the index has no webcams list', () => {
-    expect(() => mapAshCamInventory([], NOW_MS)).toThrow('missing webcams');
-    expect(() => mapAshCamInventory({ webcams: null }, NOW_MS)).toThrow('missing webcams');
   });
 });
 
