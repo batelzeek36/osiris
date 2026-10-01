@@ -29,12 +29,8 @@ import { fetchBigIslandCameras } from './bigisland';
  * about 250 of those answer, so each playlist is checked before it is used
  * (see confirmLiveStreams).
  *
- * USGS AshCam (https://volcview.wr.usgs.gov/ashcam-api/webcamApi/) — the
- * Volcano Science Center's webcam index, which carries the Hawaiian Volcano
- * Observatory's cameras. Only the ones USGS has given coordinates are placed
- * (KWcam and F1cam at Kilauea's summit on 2026-09-30); the rest are listed at
- * 0,0 and are skipped rather than guessed. The index's own geojson query
- * rounds coordinates to whole degrees, so the full list is read and filtered.
+ * Hawaii Island has no GoAkamai cameras. Its USGS volcano webcams and the
+ * Mauna Kea / Mauna Loa observatory cameras live in ./bigisland.ts.
  */
 
 /** All eight main islands, padded — anything outside is a bad coordinate. */
@@ -396,94 +392,6 @@ async function loadGoAkamaiCameras(): Promise<CctvCamera[]> {
     `(${live.size}/${streams.length} streams live, ${verdict.deadStills.size} dead stills, ` +
     `${verdict.duplicates.size} duplicate listings, ${probes.size}/${stills.length} stills judged)`,
   );
-  return cams;
-}
-
-// ═══ USGS AshCam (Hawaiian Volcano Observatory) ═══
-
-const ASHCAM_WEBCAMS = 'https://volcview.wr.usgs.gov/ashcam-api/webcamApi/webcams';
-const ASHCAM_IMAGE_HOST = 'usgs.gov';
-/**
- * HVO's cameras send a frame every few minutes, night included. One that has
- * sent nothing for a day is down, and its last frame would pass for live.
- */
-const ASHCAM_MAX_AGE_S = 24 * 60 * 60;
-
-/** One AshCam webcam (only the fields we consume). */
-export interface AshCamWebcam {
-  webcamCode?: string | null;
-  webcamName?: string | null;
-  latitude?: number | null;
-  longitude?: number | null;
-  externalUrl?: string | null;
-  vName?: string | null;
-  hasImages?: string | null;
-  lastImageTimestamp?: number | null;
-  currentImageUrl?: string | null;
-  currentMediumImageUrl?: string | null;
-}
-
-/** An https URL on a usgs.gov host, or undefined. */
-function usgsUrl(value: unknown): string | undefined {
-  const url = urlOnHost(value, ASHCAM_IMAGE_HOST);
-  return url && url.protocol === 'https:' ? url.href : undefined;
-}
-
-/**
- * Map one AshCam webcam to a camera, or null if it is outside Hawaii, unplaced,
- * imageless or gone quiet. `nowMs` is injectable for tests. Exported for tests.
- */
-export function mapAshCamWebcam(row: unknown, nowMs: number = Date.now()): CctvCamera | null {
-  if (!isRecord(row)) return null;
-  const code = text(row.webcamCode, 64);
-  if (!code || row.hasImages !== 'Y') return null;
-
-  const point = hawaiiPoint(row.latitude, row.longitude);
-  if (!point) return null;
-
-  const last = row.lastImageTimestamp;
-  if (typeof last !== 'number' || !Number.isFinite(last)) return null;
-  if (nowMs / 1000 - last > ASHCAM_MAX_AGE_S) return null;
-
-  // The medium frame is ~70 KB; the full one is over a megabyte.
-  const image = usgsUrl(row.currentMediumImageUrl) ?? usgsUrl(row.currentImageUrl);
-  if (!image) return null;
-
-  const external = usgsUrl(row.externalUrl);
-  return {
-    id: `usgs-hvo-${code}`,
-    lat: point.lat,
-    lng: point.lng,
-    name: text(row.webcamName) ?? code,
-    city: text(row.vName, 64) ?? islandFor(point.lat, point.lng),
-    country: 'US',
-    feed_url: image,
-    ...(external ? { external_url: external } : {}),
-    source: 'USGS HVO',
-  };
-}
-
-/** Map the AshCam index to Hawaii's cameras. Throws on an unexpected shape. Exported for tests. */
-export function mapAshCamInventory(data: unknown, nowMs: number = Date.now()): CctvCamera[] {
-  const webcams = isRecord(data) ? data.webcams : undefined;
-  if (!Array.isArray(webcams)) throw new Error('USGS AshCam index is missing webcams');
-  const cams = new Map<string, CctvCamera>();
-  for (const row of webcams) {
-    const cam = mapAshCamWebcam(row, nowMs);
-    if (cam && !cams.has(cam.id)) cams.set(cam.id, cam);
-  }
-  return [...cams.values()];
-}
-
-async function loadAshCamCameras(): Promise<CctvCamera[]> {
-  const res = await stealthFetch(ASHCAM_WEBCAMS, {
-    signal: AbortSignal.timeout(15000),
-    headers: { Accept: 'application/json' },
-  });
-  if (!res.ok) throw new Error(`USGS AshCam HTTP ${res.status}`);
-  // Served as text/html although the body is JSON.
-  const cams = mapAshCamInventory(JSON.parse(await res.text()));
-  console.log(`[OSIRIS] Hawaii cameras — USGS HVO: ${cams.length}`);
   return cams;
 }
 
