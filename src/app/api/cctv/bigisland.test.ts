@@ -8,8 +8,11 @@ import {
   mapHvoWebcam,
   summitCamera,
   type AshCamRecord,
+  fanOutStacked,
+  STACK_RING_METRES,
 } from './bigisland';
 import { HVO_SITES, SUMMIT_CAMERAS, dmsToDecimal } from './bigisland-cameras';
+import type { CctvCamera } from './types';
 import { stealthFetch } from '@/lib/stealthFetch';
 import { clearSourceCache } from '@/lib/sourceCache';
 
@@ -306,3 +309,28 @@ it.skipIf(!process.env.RUN_LIVE_TESTS)('loads live Hawaii Island cameras from US
   expect(cameras.every(c => c.feed_url?.startsWith('https://'))).toBe(true);
   expect(new Set(cameras.map(c => c.id)).size).toBe(cameras.length);
 }, 60_000);
+
+describe('fanOutStacked', () => {
+  const at = (id: string, lat: number, lng: number): CctvCamera => ({
+    id, lat, lng, name: id, city: 'Mauna Kea', country: 'US', source: 'test', feed_url: `https://example.org/${id}.jpg`,
+  });
+  const metres = (a: CctvCamera, b: CctvCamera) =>
+    Math.hypot((a.lat - b.lat) * 111_320, (a.lng - b.lng) * 111_320 * Math.cos((a.lat * Math.PI) / 180));
+
+  it('spreads cameras that share a point onto a ring, leaving lone cameras alone', () => {
+    const lone = at('lone', 19.4, -155.2);
+    const stack = ['g1', 'g2', 'g3', 'g4', 'g5'].map(id => at(id, 19.823802, -155.469047));
+    const out = fanOutStacked([lone, ...stack]);
+    expect(out[0]).toEqual(lone);
+    const spread = out.slice(1);
+    expect(new Set(spread.map(c => `${c.lat},${c.lng}`)).size).toBe(5);
+    for (const cam of spread) expect(metres(cam, stack[0])).toBeCloseTo(STACK_RING_METRES / 2, 1);
+  });
+
+  it('places a camera the same way every refresh, whatever order the sources answer in', () => {
+    const stack = ['b', 'a', 'c'].map(id => at(id, 19.41249, -155.29003));
+    const first = fanOutStacked(stack);
+    const second = fanOutStacked([...stack].reverse());
+    for (const cam of first) expect(second.find(c => c.id === cam.id)).toEqual(cam);
+  });
+});

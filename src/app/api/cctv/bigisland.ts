@@ -237,7 +237,39 @@ const sourceFetchers = [
   cachedSource('bigisland:observatories', loadSummitCameras),
 ];
 
+/*
+ * Several cameras share one surveyed point: KW, F1 and V1 on one mast at
+ * Kilauea, and Gemini (5), Subaru (4), IRTF (5) and UKIRT (2) each on one
+ * dome. The map opens only the top marker at a point, so the rest could not
+ * be reached at all. Each stack is fanned out on a ring this many metres
+ * across, in id order so a camera keeps its place between refreshes. The
+ * true point is moved by at most half of this, well inside the dome or mast
+ * the camera is on.
+ */
+export const STACK_RING_METRES = 15;
+
+/** Spread cameras that share an exact point onto a small ring. Exported for tests. */
+export function fanOutStacked(cams: CctvCamera[]): CctvCamera[] {
+  const stacks = new Map<string, CctvCamera[]>();
+  for (const cam of cams) {
+    const key = `${cam.lat},${cam.lng}`;
+    stacks.set(key, [...(stacks.get(key) ?? []), cam]);
+  }
+  const moved = new Map<string, CctvCamera>();
+  for (const stack of stacks.values()) {
+    if (stack.length < 2) continue;
+    const radius = STACK_RING_METRES / 2;
+    [...stack].sort((a, b) => a.id.localeCompare(b.id)).forEach((cam, i) => {
+      const angle = (2 * Math.PI * i) / stack.length;
+      const dLat = (radius * Math.cos(angle)) / 111_320;
+      const dLng = (radius * Math.sin(angle)) / (111_320 * Math.cos((cam.lat * Math.PI) / 180));
+      moved.set(cam.id, { ...cam, lat: cam.lat + dLat, lng: cam.lng + dLng });
+    });
+  }
+  return cams.map(cam => moved.get(cam.id) ?? cam);
+}
+
 export async function fetchBigIslandCameras(): Promise<CctvCamera[]> {
   const results = await Promise.allSettled(sourceFetchers.map(fetcher => fetcher()));
-  return results.flatMap(result => result.status === 'fulfilled' ? result.value : []);
+  return fanOutStacked(results.flatMap(result => result.status === 'fulfilled' ? result.value : []));
 }
